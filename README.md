@@ -131,6 +131,10 @@ This runs the full workflow: evaluate fit, draft CV + cover letter, review with 
 
 Postings are treated as untrusted input (the workflow follows no instructions embedded in them and fetches no links from their body), but agentic defenses are instruction-level, not a sandbox - on an unfamiliar job board, skim what was fetched and written before you hit send. Details in [SECURITY.md](SECURITY.md).
 
+## Employer hiring portal
+
+The [Employers & Providers portal](employer_portal/README.md) adds business profiles, public job posting, applications, a private candidate pipeline and interview scheduling with calendar downloads. Run it as a separate Python web app; it is not a static website deployment.
+
 ## Other commands
 
 - **`/plugin-search`** uses a job-search plugin available in the current agent host (such as Indeed in ChatGPT), then imports verified results into the discovery queue for `/rank` and `/apply`. See [the connection workflow](.claude/commands/plugin-search.md). Host connections do not automatically grant API access to this repository or a website; importing needs access to the local checkout.
