@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "country_code": "US",
+  "location": "United States",
+  "remote_only": true,
+  "company_scope": "all employers returned by connected provider",
+  "industry_scope": "all industries; do not constrain employers to one industry",
+  "categories": [
+    {
+      "id": "customer-service",
+      "label": "Customer service and customer care",
+      "queries": [
+        "customer service",
+        "customer care",
+        "customer support"
+      ]
+    },
+    {
+      "id": "human-resources",
+      "label": "Human resources",
+      "queries": [
+        "human resources",
+        "HR coordinator",
+        "recruiting coordinator"
+      ]
+    },
+    {
+      "id": "retail-support",
+      "label": "Cashier-related remote retail support",
+      "queries": [
+        "order entry",
+        "retail customer service",
+        "payment support"
+      ]
+    },
+    {
+      "id": "store-management",
+      "label": "Store management and retail operations",
+      "queries": [
+        "retail operations",
+        "ecommerce operations",
+        "customer service supervisor"
+      ]
+    },
+    {
+      "id": "listing-services",
+      "label": "Property and product listing services",
+      "queries": [
+        "listing coordinator",
+        "leasing coordinator",
+        "product listing specialist"
+      ]
+    },
+    {
+      "id": "marketing-advertising",
+      "label": "Marketing and advertising",
+      "queries": [
+        "marketing coordinator",
+        "digital marketing",
+        "advertising coordinator"
+      ]
+    },
+    {
+      "id": "data-entry",
+      "label": "Data entry",
+      "queries": [
+        "data entry",
+        "records specialist",
+        "data processing"
+      ]
+    },
+    {
+      "id": "accounting",
+      "label": "Accounting services",
+      "queries": [
+        "accounting assistant",
+        "bookkeeper",
+        "accounts payable"
+      ]
+    },
+    {
+      "id": "product-marketing",
+      "label": "Product marketing",
+      "queries": [
+        "product marketing",
+        "product marketing coordinator"
+      ]
+    },
+    {
+      "id": "sales",
+      "label": "Sales",
+      "queries": [
+        "inside sales",
+        "sales representative",
+        "sales support"
+      ]
+    }
+  ],
+  "optional_filters": {
+    "residence_state": null,
+    "min_salary": null,
+    "job_type": null,
+    "experience_level": null
+  },
+  "review_policy": {
+    "exclude": "required regular office attendance or field assignments",
+    "flag": [
+      "state residency restrictions",
+      "travel requirements",
+      "commission-only compensation",
+      "required credentials",
+      "remote status conflicts",
+      "posting freshness"
+    ],
+    "unknown_remote_status": "hold for review; do not label fully remote",
+    "application_action": "user selects job and reviews truthful application before submission"
+  }
+}
