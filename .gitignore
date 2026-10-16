@@ -122,3 +122,7 @@ company_research/*.json
 
 # Raw connected-plugin search output (local search history)
 **/job_scraper/plugin_results.json
+
+# Employer portal database and local session secret (never commit applicant data)
+instance/
+employer_portal/instance/

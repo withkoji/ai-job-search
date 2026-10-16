@@ -1,0 +1,4 @@
+{% macro csrf() %}<input type="hidden" name="csrf" value="{{ session.csrf }}">{% endmacro %}
+{% macro input(name,label,value='',type='text',required=true) %}<label>{{ label }}<input name="{{ name }}" type="{{ type }}" {% if type == "number" %}step="any"{% endif %} value="{{ value }}" {% if required %}required{% endif %}></label>{% endmacro %}
+{% macro textarea(name,label,value='',required=true) %}<label>{{ label }}<textarea name="{{ name }}" rows="5" {% if required %}required{% endif %}>{{ value }}</textarea></label>{% endmacro %}
+{% macro select(name,label,options,value='') %}<label>{{ label }}<select name="{{ name }}" required>{% for option in options %}<option {% if option == value %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>{% endmacro %}
