@@ -119,3 +119,6 @@ company_research/*.json
 
 # Brainstorm mockups (superpowers visual companion) - never ship
 .superpowers/
+
+# Raw connected-plugin search output (local search history)
+**/job_scraper/plugin_results.json
