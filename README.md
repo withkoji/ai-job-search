@@ -133,6 +133,8 @@ Postings are treated as untrusted input (the workflow follows no instructions em
 
 ## Other commands
 
+- **`/plugin-search`** uses a job-search plugin available in the current agent host (such as Indeed in ChatGPT), then imports verified results into the discovery queue for `/rank` and `/apply`. See [the connection workflow](.claude/commands/plugin-search.md). Host connections do not automatically grant API access to this repository or a website; importing needs access to the local checkout.
+
 `/setup`, `/scrape`, and `/apply` form the core workflow. Ten more commands extend it once your profile is in place:
 
 - **`/interview`** preps you for a scheduled interview on a tracked application. It builds a stage-specific prep pack from the application's archive (the exact posting, the CV and cover letter the interviewer actually read, feedback recorded from earlier rounds), researches the company and interviewers with a verify-before-use rule, maps likely questions to your STAR examples, and offers a mock interview following the roleplay protocol in `07-interview-prep.md`. Gaps get honest bridge answers, never invented experience.
