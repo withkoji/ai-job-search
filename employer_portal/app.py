@@ -2,6 +2,11 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
+import hashlib
+import hmac
+import time
+
+import click
 import os
 from pathlib import Path
 import re
@@ -25,7 +30,8 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS businesses (
  id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL,
  title TEXT NOT NULL, industry TEXT NOT NULL, website TEXT NOT NULL DEFAULT '',
- location TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
+ location TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+ approved INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS jobs (
  id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id),
  title TEXT NOT NULL, category TEXT NOT NULL, duties TEXT NOT NULL,
@@ -43,12 +49,23 @@ CREATE TABLE IF NOT EXISTS interviews (
  id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL REFERENCES applications(id),
  starts_at TEXT NOT NULL, timezone TEXT NOT NULL, duration INTEGER NOT NULL,
  location TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'Scheduled');
+CREATE TABLE IF NOT EXISTS request_limits (
+ bucket TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+ PRIMARY KEY(bucket,window));
+CREATE TABLE IF NOT EXISTS moderation_events (
+ id INTEGER PRIMARY KEY, business_id INTEGER NOT NULL REFERENCES businesses(id),
+ decision TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS applications_job_id ON applications(job_id);
+CREATE INDEX IF NOT EXISTS interviews_application_id ON interviews(application_id);
+CREATE INDEX IF NOT EXISTS jobs_business_id ON jobs(business_id);
 '''
 
 
 def create_app(test_config=None):
-    app = Flask(__name__, instance_relative_config=True)
-    Path(app.instance_path).mkdir(parents=True, exist_ok=True)
+    instance = os.environ.get('PORTAL_DATA_DIR')
+    app = Flask(__name__, instance_relative_config=True,
+                instance_path=str(Path(instance).resolve()) if instance else None)
+    Path(app.instance_path).mkdir(parents=True, exist_ok=True, mode=0o700)
     production = os.environ.get('PORTAL_ENV') == 'production'
     secret = os.environ.get('PORTAL_SECRET_KEY')
     if production and not secret:
@@ -65,12 +82,16 @@ def create_app(test_config=None):
     app.config.update(SECRET_KEY=secret, DATABASE=str(Path(app.instance_path) / 'portal.sqlite3'),
                       MAX_CONTENT_LENGTH=100_000, SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=production,
-                      PERMANENT_SESSION_LIFETIME=timedelta(hours=8))
+                      PERMANENT_SESSION_LIFETIME=timedelta(hours=8), REQUIRE_EMPLOYER_APPROVAL=True,
+                      PRIVACY_CONTACT=os.environ.get('PORTAL_PRIVACY_CONTACT', ''),
+                      RATE_LIMITS={'login': (10, 900), 'register': (5, 3600), 'job_detail': (10, 3600)})
     if test_config:
         app.config.update(test_config)
 
     def db():
         if 'db' not in g:
+            descriptor = os.open(app.config['DATABASE'], os.O_CREAT | os.O_RDWR, 0o600)
+            os.close(descriptor)
             g.db = sqlite3.connect(app.config['DATABASE'])
             g.db.row_factory = sqlite3.Row
             g.db.execute('PRAGMA foreign_keys=ON')
@@ -84,6 +105,12 @@ def create_app(test_config=None):
 
     with app.app_context():
         db().executescript(SCHEMA)
+        # Add the review flag to existing installations without dropping hiring data.
+        with db():
+            db().execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in db().execute('PRAGMA table_info(businesses)')}
+            if 'approved' not in columns:
+                db().execute('ALTER TABLE businesses ADD COLUMN approved INTEGER NOT NULL DEFAULT 0')
 
     def field(name, maximum=500, required=True):
         value = request.form.get(name, '').strip()
@@ -134,15 +161,47 @@ def create_app(test_config=None):
             abort(404)
         return item
 
+    def limit_request():
+        limit = app.config['RATE_LIMITS'].get(request.endpoint)
+        if not limit or request.method != 'POST':
+            return
+        maximum, seconds = limit
+        now = int(time.time())
+        window = now // seconds
+        # Do not trust forwarding headers from arbitrary clients. If a deployment
+        # uses a reverse proxy, enforce its own perimeter rate limits as well.
+        identities = ['ip:' + (request.remote_addr or 'unknown')]
+        if request.endpoint == 'login':
+            identities.append('account:' + request.form.get('email', '').strip().casefold()[:254])
+        rejected = False
+        with db():
+            for identity in identities:
+                raw = f'{request.endpoint}:{identity}'.encode()
+                bucket = hmac.new(app.config['SECRET_KEY'].encode(), raw, hashlib.sha256).hexdigest()
+                db().execute('''INSERT INTO request_limits(bucket,window,count,expires_at) VALUES (?,?,1,?)
+                    ON CONFLICT(bucket,window) DO UPDATE SET count=count+1''', (bucket, window, (window + 1) * seconds))
+                count = db().execute('SELECT count FROM request_limits WHERE bucket=? AND window=?',
+                                     (bucket, window)).fetchone()['count']
+                rejected = rejected or count > maximum
+            # A bounded history; no email addresses or IPs are stored in plaintext.
+            db().execute('DELETE FROM request_limits WHERE expires_at <= ?', (now,))
+        if rejected:
+            response = Response('Too many requests. Please try again later.', status=429)
+            response.headers['Retry-After'] = str(seconds - now % seconds)
+            abort(response)
+
     @app.before_request
     def security():
+        if request.endpoint == 'health':
+            return
         g.business = db().execute('SELECT * FROM businesses WHERE id=?',
                                   (session.get('business_id'),)).fetchone()
         if 'csrf' not in session:
             session['csrf'] = secrets.token_urlsafe(32)
         if request.method == 'POST' and not secrets.compare_digest(
-                request.form.get('csrf', ''), session['csrf']):
+                request.form.get('csrf', '').encode(), session['csrf'].encode()):
             abort(400, 'Your form expired. Reload the page and try again.')
+        limit_request()
 
     @app.after_request
     def headers(response):
@@ -151,6 +210,70 @@ def create_app(test_config=None):
         response.headers['Content-Security-Policy'] = "default-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
         response.headers['Cache-Control'] = 'no-store'
         return response
+
+    @app.get('/healthz')
+    def health():
+        try:
+            db().execute('SELECT 1 FROM businesses LIMIT 1').fetchone()
+            return {'status': 'ok'}
+        except sqlite3.Error:
+            return {'status': 'unavailable'}, 503
+
+    @app.get('/privacy')
+    def privacy():
+        return render_template('privacy.html', contact=app.config['PRIVACY_CONTACT'])
+
+    @app.cli.command('review-employer')
+    @click.option('--email', 'address', required=True)
+    @click.option('--decision', type=click.Choice(['approve', 'pause']), required=True)
+    def review_employer(address, decision):
+        """Record an operator's completed business review; sends no messages."""
+        with app.app_context():
+            business = db().execute('SELECT id FROM businesses WHERE email=?', (address.strip().lower(),)).fetchone()
+            if not business:
+                raise click.ClickException('Business not found.')
+            with db():
+                db().execute('UPDATE businesses SET approved=? WHERE id=?', (int(decision == 'approve'), business['id']))
+                db().execute('INSERT INTO moderation_events(business_id,decision,created_at) VALUES (?,?,?)',
+                             (business['id'], decision, datetime.now(timezone.utc).isoformat()))
+            click.echo(f'Business {business["id"]}: {decision}.')
+
+    @app.cli.command('delete-application')
+    @click.option('--application-id', required=True, type=int)
+    @click.option('--apply', 'apply_change', is_flag=True)
+    def delete_application(application_id, apply_change):
+        """Preview or execute an operator-authorized applicant data deletion."""
+        with app.app_context():
+            item = db().execute('SELECT id FROM applications WHERE id=?', (application_id,)).fetchone()
+            if not item:
+                raise click.ClickException('Application not found.')
+            if not apply_change:
+                click.echo(f'Preview: delete application {application_id} and its interviews. Repeat with --apply to delete.')
+                return
+            with db():
+                db().execute('DELETE FROM interviews WHERE application_id=?', (application_id,))
+                db().execute('DELETE FROM applications WHERE id=?', (application_id,))
+            click.echo(f'Deleted application {application_id} and its interviews.')
+
+    @app.cli.command('launch-check')
+    def launch_check():
+        """Check deployment settings without exposing credentials or applicant data."""
+        failures = []
+        if not production:
+            failures.append('Set PORTAL_ENV=production.')
+        if len(app.config['SECRET_KEY']) < 32:
+            failures.append('Use a random secret of at least 32 characters.')
+        if not app.config['PRIVACY_CONTACT']:
+            failures.append('Set PORTAL_PRIVACY_CONTACT to your applicant privacy contact.')
+        if not os.environ.get('PORTAL_DATA_DIR'):
+            failures.append('Set PORTAL_DATA_DIR to a persistent writable directory.')
+        if not app.config['REQUIRE_EMPLOYER_APPROVAL']:
+            failures.append('Enable employer approval before publishing.')
+        if not app.config['SESSION_COOKIE_SECURE']:
+            failures.append('Enable secure cookies and serve through HTTPS.')
+        if failures:
+            raise click.ClickException('\n'.join(failures))
+        click.echo('Configuration checks passed. Confirm HTTPS, backups, recovery, and privacy operations before inviting users.')
 
     @app.context_processor
     def context():
@@ -169,6 +292,8 @@ def create_app(test_config=None):
         sql = '''SELECT j.*, b.title AS business_title FROM jobs j JOIN businesses b
                  ON b.id=j.business_id WHERE j.status='Open' '''
         values = []
+        if app.config['REQUIRE_EMPLOYER_APPROVAL']:
+            sql += ' AND b.approved=1'
         if query:
             sql += ' AND (j.title LIKE ? OR b.title LIKE ? OR j.duties LIKE ?)'
             values += ['%' + query + '%'] * 3
@@ -238,7 +363,15 @@ def create_app(test_config=None):
         jobs = db().execute('''SELECT j.*, COUNT(a.id) AS applicants FROM jobs j
             LEFT JOIN applications a ON a.job_id=j.id WHERE j.business_id=?
             GROUP BY j.id ORDER BY j.id DESC''', (g.business['id'],)).fetchall()
-        return render_template('dashboard.html', jobs=jobs)
+        pending = db().execute('''SELECT a.id, a.name, a.status, j.title AS job_title
+            FROM applications a JOIN jobs j ON j.id=a.job_id
+            WHERE j.business_id=? AND a.status IN ('New','Reviewing') ORDER BY a.id LIMIT 5''',
+            (g.business['id'],)).fetchall()
+        upcoming = db().execute('''SELECT i.*, a.name, j.title AS job_title
+            FROM interviews i JOIN applications a ON a.id=i.application_id JOIN jobs j ON j.id=a.job_id
+            WHERE j.business_id=? AND i.status='Scheduled' AND i.starts_at>=? ORDER BY i.starts_at LIMIT 5''',
+            (g.business['id'], datetime.now(timezone.utc).isoformat())).fetchall()
+        return render_template('dashboard.html', jobs=jobs, pending=pending, upcoming=upcoming)
 
     @app.route('/employer/jobs/new', methods=['GET', 'POST'])
     @app.route('/employer/jobs/<int:job_id>/edit', methods=['GET', 'POST'])
@@ -270,10 +403,10 @@ def create_app(test_config=None):
 
     @app.route('/jobs/<int:job_id>', methods=['GET', 'POST'])
     def job_detail(job_id):
-        job = db().execute('''SELECT j.*, b.title AS business_title, b.description AS business_description
+        job = db().execute('''SELECT j.*, b.title AS business_title, b.approved AS business_approved, b.description AS business_description
             FROM jobs j JOIN businesses b ON b.id=j.business_id WHERE j.id=? AND j.status='Open' ''',
                            (job_id,)).fetchone()
-        if not job:
+        if not job or (app.config['REQUIRE_EMPLOYER_APPROVAL'] and not job['business_approved']):
             abort(404)
         if request.method == 'POST':
             if request.form.get('consent') != 'yes':
@@ -292,8 +425,17 @@ def create_app(test_config=None):
     @employer
     def candidates(job_id):
         job = owned_job(job_id)
-        items = db().execute('SELECT * FROM applications WHERE job_id=? ORDER BY id DESC', (job_id,)).fetchall()
-        return render_template('candidates.html', job=job, candidates=items)
+        status = request.args.get('status', '')
+        query = request.args.get('q', '').strip()[:200]
+        sql, values = 'SELECT * FROM applications WHERE job_id=?', [job_id]
+        if status in STATUSES:
+            sql += ' AND status=?'
+            values.append(status)
+        if query:
+            sql += ' AND (name LIKE ? OR email LIKE ?)'
+            values += ['%' + query + '%'] * 2
+        items = db().execute(sql + ' ORDER BY id DESC', values).fetchall()
+        return render_template('candidates.html', job=job, candidates=items, selected_status=status, q=query)
 
     @app.route('/employer/applications/<int:application_id>', methods=['GET', 'POST'])
     @employer
